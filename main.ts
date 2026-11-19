@@ -1,25 +1,89 @@
-// A working gta6-meme-x-01 entry (Node 22, standard library only): it copies POST.json from the repository root to
-// /output/POST.json, where the gate reads it. That is all the program has to do. The entry is the post itself: your
-// agent makes a GTA 6 meme, it is posted on X from a public account with make.fun (a link or written out) and/or a
-// tag of @makefunai and your play code in its text, POST.json names the post, and the house reads the post from X (its
-// first picture and its text) and hands that to the judge. Nothing this program writes about the post is judged.
+// gta6-meme-x-01 entry runner (Node 22, standard library only).
 //
-// The POST.json this starter ships holds a placeholder address, so the gate refuses it as it stands (valid 0).
-// Replace it with your post's address before you submit.
+// The entry itself is the X post: a GTA 6 meme posted from a public account,
+// carrying a make.fun link and/or @makefunai plus one of our play codes.
+// This program only delivers POST.json — the file that names that post —
+// from the repository root into the output directory, after checking the
+// file is actually a well-formed pointer to a real X post. The house reads
+// the post from X itself; nothing this program writes about the post is
+// judged, so a bad pointer must fail loudly here instead of silently
+// shipping a broken entry.
 //
-// Outside the grader's container, MAKEFUN_BOT_DIR and MAKEFUN_OUTPUT_DIR stand in for /bot and /output:
+// Run locally the same way the grader does, with the two directories
+// swapped for local ones:
 //   mkdir -p out && MAKEFUN_BOT_DIR=. MAKEFUN_OUTPUT_DIR=out node main.ts
 
-import { copyFileSync, mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-const BOT_DIR = process.env.MAKEFUN_BOT_DIR ?? '/bot';
-const OUTPUT_DIR = process.env.MAKEFUN_OUTPUT_DIR ?? '/output';
+// An X post address, exactly as X shows it. The gate accepts x.com or
+// twitter.com, a handle, then /status/ followed by digits only.
+// Built from a string on purpose: Node's built-in TypeScript stripping
+// chokes on a regex literal that contains an escaped slash (\/).
+const POST_URL_PATTERN = new RegExp(
+  '^https://(x\\.com|twitter\\.com)/[^/]+/status/\\d+$',
+);
 
-mkdirSync(OUTPUT_DIR, { recursive: true });
-try {
-  copyFileSync(join(BOT_DIR, 'POST.json'), join(OUTPUT_DIR, 'POST.json'));
-} catch (err) {
-  console.error(`POST.json could not be copied from ${BOT_DIR}: ${(err as Error).message}`);
+// The sealed scorer refuses a POST.json larger than this.
+const MAX_POST_FILE_BYTES = 16384;
+
+const botDir = process.env.MAKEFUN_BOT_DIR ?? '/bot';
+const outputDir = process.env.MAKEFUN_OUTPUT_DIR ?? '/output';
+
+function fail(step: string, detail: string): never {
+  console.error(`[gta6-meme-x-01] FAILED at ${step}: ${detail}`);
   process.exit(1);
 }
+
+const postPath = join(botDir, 'POST.json');
+const memePath = join(botDir, 'meme.png');
+const outPath = join(outputDir, 'POST.json');
+
+console.log(`[gta6-meme-x-01] reading ${postPath}`);
+
+if (!existsSync(postPath)) {
+  fail('read', `POST.json is missing under ${botDir}`);
+}
+
+const raw = readFileSync(postPath);
+console.log(`[gta6-meme-x-01] POST.json is ${raw.length} bytes`);
+
+if (raw.length > MAX_POST_FILE_BYTES) {
+  fail('size', `POST.json is ${raw.length} bytes, over the ${MAX_POST_FILE_BYTES} byte limit`);
+}
+
+let parsed: unknown;
+try {
+  parsed = JSON.parse(raw.toString('utf8'));
+} catch (err) {
+  fail('parse', `POST.json is not valid JSON: ${(err as Error).message}`);
+}
+
+if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+  fail('shape', 'POST.json must be a JSON object like {"url": "https://x.com/<handle>/status/<id>"}');
+}
+
+const url = (parsed as Record<string, unknown>).url;
+if (typeof url !== 'string' || !POST_URL_PATTERN.test(url)) {
+  fail('url', `url ${JSON.stringify(url)} is not an X post address (expected https://x.com/<handle>/status/<id>)`);
+}
+console.log(`[gta6-meme-x-01] post url OK: ${url}`);
+
+// The post's first picture is what the judge sees, so the meme file the
+// post was made from must still be in the repository.
+if (!existsSync(memePath)) {
+  fail('meme', `meme.png is missing under ${botDir}`);
+}
+const memeBytes = statSync(memePath).size;
+console.log(`[gta6-meme-x-01] meme.png present (${memeBytes} bytes)`);
+
+mkdirSync(outputDir, { recursive: true });
+writeFileSync(outPath, raw);
+
+// Prove the copy landed intact: read the output back and compare it
+// byte-for-byte with what was read from the repository.
+const writtenBack = readFileSync(outPath);
+if (!writtenBack.equals(raw)) {
+  fail('verify', `${outPath} does not match ${postPath} after writing`);
+}
+console.log(`[gta6-meme-x-01] wrote ${outPath} (${writtenBack.length} bytes, verified)`);
